@@ -1,0 +1,855 @@
+import turtle
+import pickle
+import random
+import os
+import time
+import traceback
+import math
+from tkinter import TclError
+
+HISTORY_FILE = 'games_history.txt'
+SAVE_FILE = 'saved_board.pkl'
+# ensure save file lives next to this script (avoid CWD issues)
+SAVE_PATH = os.path.join(os.path.dirname(__file__), SAVE_FILE)
+# fallback save path (user home) in case script folder isn't writable
+FALLBACK_SAVE_PATH = os.path.join(os.path.expanduser('~'), SAVE_FILE)
+
+CELL_SIZE = 120
+HALF = CELL_SIZE * 1.5  # board spans roughly -HALF..HALF
+
+# Map board indices (1-3) to turtle coordinates
+def cell_center(row, col):
+    # row and col are 1..3, row 1 is top
+    x = (col - 2) * CELL_SIZE
+    y = (2 - row) * CELL_SIZE
+    return x, y
+
+
+def draw_board(pen):
+    pen.clear()
+    pen.hideturtle()
+    pen.pensize(3)
+    # draw two vertical and two horizontal lines
+    for i in (-CELL_SIZE / 2, CELL_SIZE / 2):
+        pen.penup()
+        pen.goto(i, HALF)
+        pen.pendown()
+        pen.goto(i, -HALF)
+    for j in (-CELL_SIZE / 2, CELL_SIZE / 2):
+        pen.penup()
+        pen.goto(-HALF, j)
+        pen.pendown()
+        pen.goto(HALF, j)
+
+
+def draw_X(pen, row, col):
+    x, y = cell_center(row, col)
+    pen.penup()
+    pen.goto(x - 30, y - 30)
+    pen.pendown()
+    pen.pensize(4)
+    pen.color('blue')
+    pen.goto(x + 30, y + 30)
+    pen.penup()
+    pen.goto(x - 30, y + 30)
+    pen.pendown()
+    pen.goto(x + 30, y - 30)
+    pen.penup()
+
+
+def draw_O(pen, row, col):
+    x, y = cell_center(row, col)
+    pen.penup()
+    pen.goto(x, y - 34)
+    pen.pendown()
+    pen.pensize(4)
+    pen.color('green')
+    pen.circle(34)
+    pen.penup()
+
+
+def redraw_board(pen, board):
+    draw_board(pen)
+    # draw existing marks
+    for r in range(3):
+        for c in range(3):
+            mark = board[r][c]
+            if mark == 'X':
+                draw_X(pen, r + 1, c + 1)
+            elif mark == 'O':
+                draw_O(pen, r + 1, c + 1)
+
+
+def check_win(board):
+    # board is 3x3 list of 'X'/'O'/None
+    lines = []
+    # rows
+    for r in range(3):
+        lines.append([(r, 0), (r, 1), (r, 2)])
+    # cols
+    for c in range(3):
+        lines.append([(0, c), (1, c), (2, c)])
+    # diags
+    lines.append([(0, 0), (1, 1), (2, 2)])
+    lines.append([(0, 2), (1, 1), (2, 0)])
+
+    for line in lines:
+        a, b, c = line
+        v1 = board[a[0]][a[1]]
+        v2 = board[b[0]][b[1]]
+        v3 = board[c[0]][c[1]]
+        if v1 is not None and v1 == v2 == v3:
+            # return winner and the winning cells as 1-based tuples
+            return v1, [(a[0] + 1, a[1] + 1), (b[0] + 1, b[1] + 1), (c[0] + 1, c[1] + 1)]
+    # check tie
+    full = all(board[r][c] is not None for r in range(3) for c in range(3))
+    if full:
+        return 'Tie', []
+    return None, []
+
+
+def highlight_win(pen, cells):
+    # draw a red line connecting the centers of the two extreme cells
+    if not cells:
+        return
+    pen.color('red')
+    pen.pensize(6)
+    pen.penup()
+    x1, y1 = cell_center(cells[0][0], cells[0][1])
+    x3, y3 = cell_center(cells[2][0], cells[2][1])
+    pen.goto(x1, y1)
+    pen.pendown()
+    pen.goto(x3, y3)
+    pen.penup()
+
+
+def save_board(board, current=None, player_names=None, filename=None):
+    """Save board and optional metadata (current player and player_names) to a binary file.
+    filename: optional path; defaults to SAVE_PATH.
+    """
+    if filename is None:
+        filename = SAVE_PATH
+    data = {
+        'board': board,
+        'current': current,
+        'player_names': player_names,
+    }
+    try:
+        with open(filename, 'wb') as f:
+            pickle.dump(data, f)
+        print(f"Game saved to {filename}")
+    except Exception as e:
+        print("Failed to save game:", e)
+        # try fallback
+        try:
+            with open(FALLBACK_SAVE_PATH, 'wb') as f2:
+                pickle.dump(data, f2)
+            print(f"Game saved to fallback path: {FALLBACK_SAVE_PATH}")
+            return
+        except Exception as e2:
+            print("Failed to save to fallback path:", e2)
+
+
+def load_board(filename=None):
+    """Load saved data from binary file. Returns a dict with keys 'board', 'current', 'player_names' or None."""
+    if filename is None:
+        filename = SAVE_PATH
+    if not os.path.exists(filename):
+        # try fallback path
+        if os.path.exists(FALLBACK_SAVE_PATH):
+            filename = FALLBACK_SAVE_PATH
+        else:
+            print(f"No saved game found at {filename} or fallback {FALLBACK_SAVE_PATH}")
+            return None
+    try:
+        with open(filename, 'rb') as f:
+            data = pickle.load(f)
+        print(f"Loaded game from {filename}")
+        return data
+    except Exception as e:
+        print("Failed to load saved game:", e)
+        return None
+
+
+def log_game(player1, player2, winner):
+    try:
+        with open(HISTORY_FILE, 'a', encoding='utf-8') as f:
+            f.write(f"{player1},{player2},{winner}\n")
+    except Exception as e:
+        print("Failed to write history:", e)
+
+
+def print_history():
+    if not os.path.exists(HISTORY_FILE):
+        print("No history yet.")
+        return
+    print("Game history:")
+    try:
+        with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
+            for line in f:
+                ln = line.strip()
+                if not ln:
+                    continue
+                parts = [p.strip() for p in ln.split(',')]
+                if len(parts) >= 3:
+                    p1 = parts[0]
+                    p2 = parts[1]
+                    winner = ','.join(parts[2:])
+                    print(f"Player 1: {p1} , Player 2: {p2} . Winner: {winner}.")
+                else:
+                    print(ln)
+    except Exception as e:
+        print("Failed to read history:", e)
+
+
+def clear_history(screen=None):
+    """Clear the games history file after a confirmation.
+    If `screen` is provided, ask for confirmation via a GUI dialog; otherwise use console.
+    """
+    try:
+        if screen is not None:
+            screen, res = safe_textinput(screen, 'Clear history', 'Type YES to permanently clear game history:')
+            if res is None:
+                return False
+            if str(res).strip().upper() != 'YES':
+                # user cancelled or didn't confirm
+                try:
+                    screen, _ = safe_textinput(screen, 'Canceled', 'History not cleared. Press OK to continue.')
+                except Exception:
+                    pass
+                return False
+        else:
+            try:
+                confirm = input('Type YES to permanently clear game history: ')
+            except Exception:
+                confirm = None
+            if confirm is None or confirm.strip().upper() != 'YES':
+                print('History not cleared.')
+                return False
+
+        if os.path.exists(HISTORY_FILE):
+            try:
+                os.remove(HISTORY_FILE)
+                msg = 'History cleared.'
+            except Exception as e:
+                msg = f'Failed to clear history: {e}'
+        else:
+            msg = 'No history file found.'
+
+        if screen is not None:
+            try:
+                screen, _ = safe_textinput(screen, 'Result', msg + ' Press OK to continue.')
+            except Exception:
+                pass
+        else:
+            print(msg)
+        return True
+    except Exception as e:
+        print('Error while clearing history:', e)
+        return False
+
+
+def random_ai_move(board):
+    empty = [(r, c) for r in range(3) for c in range(3) if board[r][c] is None]
+    if not empty:
+        return None
+    r, c = random.choice(empty)
+    return r + 1, c + 1
+
+
+def strategic_ai_move(board, my_mark):
+    # Try to win, block opponent, take center, take corner, else random
+    opponent = 'O' if my_mark == 'X' else 'X'
+
+    # helper to test move
+    def can_win_with(mark):
+        for r in range(3):
+            for c in range(3):
+                if board[r][c] is None:
+                    board[r][c] = mark
+                    winner, _ = check_win(board)
+                    board[r][c] = None
+                    if winner == mark:
+                        return r + 1, c + 1
+        return None
+
+    # 1. win
+    win_move = can_win_with(my_mark)
+    if win_move:
+        return win_move
+    # 2. block
+    block_move = can_win_with(opponent)
+    if block_move:
+        return block_move
+    # 3. take center
+    if board[1][1] is None:
+        return 2, 2
+    # 4. take any corner
+    corners = [(0, 0), (0, 2), (2, 0), (2, 2)]
+    random.shuffle(corners)
+    for r, c in corners:
+        if board[r][c] is None:
+            return r + 1, c + 1
+    # 5. else random
+    return random_ai_move(board)
+
+
+def safe_textinput(screen, title, prompt):
+    """
+    Call screen.textinput but if the underlying Tk root was closed and raises TclError,
+    recreate a new screen and retry once. Returns (screen, result).
+    """
+    try:
+        res = screen.textinput(title, prompt)
+        return screen, res
+    except TclError:
+        # recreate screen and retry once
+        try:
+            new_screen = turtle.Screen()
+            new_screen.title('Tic-Tac-Toe')
+            res = new_screen.textinput(title, prompt)
+            return new_screen, res
+        except Exception:
+            return screen, None
+
+
+def display_message(msg_turtle, text):
+    try:
+        msg_turtle.clear()
+        msg_turtle.penup()
+        msg_turtle.goto(0, HALF + 10)
+        msg_turtle.color('black')
+        msg_turtle.write(text, align='center', font=('Arial', 16, 'bold'))
+    except Exception:
+        pass
+
+
+def highlight_cells(pen, cells):
+    # Draw a rotated ellipse that reliably contains the marks for the three winning cells.
+    if not cells:
+        return
+    centers = [cell_center(r, c) for (r, c) in cells]
+    # major vector from first to last center
+    x0, y0 = centers[0]
+    x2, y2 = centers[-1]
+    vx = x2 - x0
+    vy = y2 - y0
+    vlen = math.hypot(vx, vy)
+
+    # Use a modest mark bbox to include X and O strokes (reduced to make ellipse tighter)
+    mark_dx = 44
+    mark_dy = 44
+    # collect all corners of each mark's bbox
+    all_corners = []
+    for (cx, cy) in centers:
+        all_corners.extend([
+            (cx - mark_dx, cy - mark_dy),
+            (cx - mark_dx, cy + mark_dy),
+            (cx + mark_dx, cy - mark_dy),
+            (cx + mark_dx, cy + mark_dy),
+        ])
+
+    # axis-aligned bbox center (used as ellipse center before rotation)
+    xs = [p[0] for p in all_corners]
+    ys = [p[1] for p in all_corners]
+    bbox_cx = (min(xs) + max(xs)) / 2.0
+    bbox_cy = (min(ys) + max(ys)) / 2.0
+
+    # rotation angle aligns with winning vector when available
+    angle = math.atan2(vy, vx) if vlen != 0 else 0.0
+    ux = math.cos(angle)
+    uy = math.sin(angle)
+
+    # project bbox corners into rotated frame centered at bbox center
+    proj_vals = []
+    perp_vals = []
+    for (px, py) in all_corners:
+        dx = px - bbox_cx
+        dy = py - bbox_cy
+        along = dx * ux + dy * uy
+        perp = -dx * uy + dy * ux
+        proj_vals.append(along)
+        perp_vals.append(perp)
+
+    # radii are max absolute projections plus padding; choose smaller padding for a tighter ellipse
+    pad_major = 18
+    pad_minor = 14
+    rx = max(abs(v) for v in proj_vals) + pad_major
+    ry = max(abs(v) for v in perp_vals) + pad_minor
+    # ensure rx/ry are at least large enough to contain a single mark (small safety margin)
+    rx = max(rx, mark_dx + 8)
+    ry = max(ry, mark_dy + 6)
+    mx, my = bbox_cx, bbox_cy
+
+    # draw rotated ellipse parametric
+    pen.color('red')
+    pen.pensize(4)
+    pen.penup()
+    steps = 80
+    # starting point
+    t0 = 0.0
+    x_start = mx + rx * math.cos(t0) * math.cos(angle) - ry * math.sin(t0) * math.sin(angle)
+    y_start = my + rx * math.cos(t0) * math.sin(angle) + ry * math.sin(t0) * math.cos(angle)
+    pen.goto(x_start, y_start)
+    pen.pendown()
+    for i in range(1, steps + 1):
+        t = (2 * math.pi) * i / steps
+        x = mx + rx * math.cos(t) * math.cos(angle) - ry * math.sin(t) * math.sin(angle)
+        y = my + rx * math.cos(t) * math.sin(angle) + ry * math.sin(t) * math.cos(angle)
+        pen.goto(x, y)
+    pen.penup()
+
+
+def prompt_int(screen, prompt_text):
+    # Prefer console input so dialogs don't cover the board. Fall back to GUI textinput if no console.
+    while True:
+        # Try console input first
+        try:
+            res = input(prompt_text + ' (1-3, or q to cancel): ')
+        except Exception:
+            # No console available -> fallback to GUI
+            screen, res = safe_textinput(screen, 'Input', prompt_text + ' (1-3)')
+        if res is None:
+            return None
+        res = str(res).strip()
+        if res.lower() in ('q', 'quit', 'cancel'):
+            return None
+        if not res.isdigit():
+            continue
+        val = int(res)
+        if 1 <= val <= 3:
+            return val
+        # else loop again
+
+
+def click_to_cell(screen, msg_turtle):
+    """Wait for the user to click a board cell and return (row, col) 1-based.
+    Pressing 'm' will open the pause/menu (returns None in that case).
+    """
+    clicked = {}
+    menu_requested = {'val': False}
+
+    def handler(x, y):
+        clicked['xy'] = (x, y)
+
+    def menu_handler():
+        menu_requested['val'] = True
+
+    # show instruction
+    display_message(msg_turtle, "Click a cell to place mark (press 'm' for menu)")
+    screen.onscreenclick(handler)
+    screen.onkey(menu_handler, 'm')
+    screen.listen()
+
+    try:
+        while True:
+            if 'xy' in clicked:
+                x, y = clicked['xy']
+                # determine column
+                if x < -CELL_SIZE / 2:
+                    col = 1
+                elif x > CELL_SIZE / 2:
+                    col = 3
+                else:
+                    col = 2
+                # determine row (top is 1)
+                if y > CELL_SIZE / 2:
+                    row = 1
+                elif y < -CELL_SIZE / 2:
+                    row = 3
+                else:
+                    row = 2
+                return row, col
+            if menu_requested['val']:
+                return None
+            screen.update()
+            time.sleep(0.05)
+    finally:
+        # cleanup handlers
+        try:
+            screen.onscreenclick(None)
+            screen.onkey(None, 'm')
+        except Exception:
+            pass
+        try:
+            msg_turtle.clear()
+        except Exception:
+            pass
+
+
+def play_game(mode='hvh', player1_name='Player1', player2_name='Player2', loaded_board=None, existing_screen=None):
+    # mode: 'hvh', 'hvr_random', 'hvr_strat'
+    # If a screen is provided (from main_menu), reuse it to avoid destroying the Tk root.
+    if existing_screen is None:
+        screen = turtle.Screen()
+    else:
+        screen = existing_screen
+    screen.title('Tic-Tac-Toe')
+    pen = turtle.Turtle()
+    pen.hideturtle()
+    pen.speed(0)
+    # initialize player names early so they exist even if we load saved board metadata
+    player_names = {'X': player1_name, 'O': player2_name}
+    # dedicated turtle for messages so we don't overwrite the board drawing
+    msg_turtle = turtle.Turtle()
+    msg_turtle.hideturtle()
+    msg_turtle.penup()
+    msg_turtle.speed(0)
+
+    # initialize board and metadata
+    board = [[None for _ in range(3)] for _ in range(3)]
+    # loaded_board may be a simple board or the dict produced by load_board
+    if loaded_board:
+        if isinstance(loaded_board, dict) and 'board' in loaded_board:
+            board = loaded_board['board']
+            # if saved player names exist, use them as defaults
+            saved_names = loaded_board.get('player_names') or {}
+            if isinstance(saved_names, dict):
+                player_names = {'X': saved_names.get('X', player1_name), 'O': saved_names.get('O', player2_name)}
+            else:
+                # older saves may have just been list-based; fallback
+                player_names = {'X': player1_name, 'O': player2_name}
+            # restore current player if present
+            saved_current = loaded_board.get('current')
+            if saved_current in ('X', 'O'):
+                current = saved_current
+            else:
+                current = 'X'
+        else:
+            board = loaded_board
+            current = 'X'
+    else:
+        current = 'X'
+
+    redraw_board(pen, board)
+
+    # ensure player_names exists (may have been set from loaded data)
+    try:
+        player_names
+    except NameError:
+        player_names = {'X': player1_name, 'O': player2_name}
+
+    while True:
+        winner, win_cells = check_win(board)
+        if winner:
+            if winner == 'Tie':
+                print('The game is a tie.')
+                log_game(player1_name, player2_name, 'Tie')
+                display_message(msg_turtle, 'Game over: Tie')
+            else:
+                print(f"Player '{player_names[winner]}' ({winner}) wins!")
+                log_game(player1_name, player2_name, player_names[winner])
+                # visually highlight winning cells and display message on screen
+                highlight_cells(pen, win_cells)
+                display_message(msg_turtle, f"Winner: {player_names[winner]} ({winner})")
+            break
+
+        if mode == 'hvh' or (mode.startswith('hvr') and current == 'X'):
+            # human move via clicking the board; press 'm' to open pause/menu
+            display_message(msg_turtle, f"{player_names[current]}'s turn ({current}) - click a cell (press 'm' for menu)")
+            sel = click_to_cell(screen, msg_turtle)
+            if sel is None:
+                # show pause menu
+                screen, choice = safe_textinput(screen, 'Paused', 'Type save/load/quit/continue/history:')
+                if choice is None:
+                    continue
+                choice = choice.strip().lower()
+                if choice == 'save':
+                    # save board plus current player and player names
+                    save_board(board, current=current, player_names=player_names)
+                    # show simple on-screen confirmation (avoid showing full save path)
+                    try:
+                        display_message(msg_turtle, "Game saved.")
+                        # keep message visible briefly
+                        time.sleep(1.0)
+                        msg_turtle.clear()
+                    except Exception:
+                        pass
+                    continue
+                elif choice == 'load':
+                    loaded = load_board()
+                    if loaded:
+                        board = loaded['board']
+                        current = loaded.get('current', 'X')
+                        # update player names if present in saved data
+                        saved_names = loaded.get('player_names')
+                        if isinstance(saved_names, dict):
+                            player_names = {'X': saved_names.get('X', player1_name), 'O': saved_names.get('O', player2_name)}
+                        redraw_board(pen, board)
+                    continue
+                elif choice == 'quit':
+                    print('Quitting game.')
+                    break
+                elif choice == 'history':
+                    # show history both in console and on screen
+                    print_history()
+                    show_history_on_screen(screen)
+                    continue
+                else:
+                    continue
+            row, col = sel
+            r_idx, c_idx = row - 1, col - 1
+            if board[r_idx][c_idx] is not None:
+                display_message(msg_turtle, 'Cell occupied. Choose another cell or press m for menu')
+                continue
+            board[r_idx][c_idx] = current
+            # draw
+            if current == 'X':
+                draw_X(pen, row, col)
+            else:
+                draw_O(pen, row, col)
+            current = 'O' if current == 'X' else 'X'
+        else:
+            # AI move
+            time.sleep(0.3)
+            if mode == 'hvr_random':
+                move = random_ai_move(board)
+            else:
+                move = strategic_ai_move(board, current)
+            if move:
+                row, col = move
+                r_idx, c_idx = row - 1, col - 1
+                board[r_idx][c_idx] = current
+                if current == 'X':
+                    draw_X(pen, row, col)
+                else:
+                    draw_O(pen, row, col)
+                current = 'O' if current == 'X' else 'X'
+
+    # After game ends, keep the screen/root alive and wait for user acknowledgement
+    try:
+        screen, _ = safe_textinput(screen, 'Finished', 'Press OK to return to menu.')
+    except Exception:
+        # fallback to console pause
+        try:
+            input('Game finished. Press Enter to return to menu...')
+        except Exception:
+            pass
+    # clear message turtle when returning to menu
+    try:
+        msg_turtle.clear()
+    except Exception:
+        pass
+    draw_board(pen)
+    # leave the screen open; caller (main_menu) will continue the loop or close on demand
+    return
+
+
+def report_exception(screen, exc):
+    try:
+        tb = traceback.format_exc()
+        with open('tic_tac_toe_error.log', 'a', encoding='utf-8') as f:
+            f.write(f"\n--- {time.asctime()} ---\n")
+            f.write(tb)
+        # try to show a message to the user
+        try:
+            screen, _ = safe_textinput(screen, 'Error', 'An error occurred; details were written to tic_tac_toe_error.log. Press OK to continue.')
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def show_history_on_screen(screen):
+    """Read HISTORY_FILE and display its contents inside the turtle window."""
+    lines = []
+    if not os.path.exists(HISTORY_FILE):
+        lines = ['No history yet.']
+    else:
+        try:
+            with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
+                lines = [ln.strip() for ln in f.readlines() if ln.strip()]
+            if not lines:
+                lines = ['No history yet.']
+        except Exception as e:
+            lines = [f'Failed to read history: {e}']
+
+    hist_t = turtle.Turtle()
+    hist_t.hideturtle()
+    hist_t.penup()
+    hist_t.color('black')
+    # Determine layout: start from the left edge of the window (not the board)
+    try:
+        win_w = screen.window_width()
+        win_h = screen.window_height()
+    except Exception:
+        # fallback to board-based sizes
+        win_w = CELL_SIZE * 4
+        win_h = CELL_SIZE * 3
+    x = -win_w / 2 + 10
+    y = win_h / 2 - 20
+    hist_t.goto(x, y)
+    font = ('Courier', 12, 'normal')
+    # estimate how many lines fit vertically
+    max_lines = int((win_h - 40) // 18)
+
+    # show most recent lines if too many
+    if len(lines) > max_lines:
+        display_lines = lines[-max_lines:]
+        display_lines.insert(0, '... (showing last lines)')
+    else:
+        display_lines = lines
+
+    # Format lines for display: parse CSV and render labeled output
+    formatted = []
+    for ln in display_lines:
+        parts = [p.strip() for p in ln.split(',')]
+        if len(parts) >= 3:
+            p1 = parts[0]
+            p2 = parts[1]
+            winner = ','.join(parts[2:])
+            formatted.append(f"Player 1: {p1} , Player 2: {p2} . Winner: {winner}.")
+        else:
+            formatted.append(ln)
+
+    # wrap long lines to fit window width (approx characters)
+    approx_char_width = 7  # approximate pixel width per character for Courier 12
+    max_chars = max(30, int((win_w - 40) / approx_char_width))
+    lines_to_draw = []
+    for ln in formatted:
+        if len(ln) <= max_chars:
+            lines_to_draw.append(ln)
+        else:
+            # split into chunks without breaking words when possible
+            words = ln.split(' ')
+            cur = ''
+            for w in words:
+                if len(cur) + 1 + len(w) <= max_chars:
+                    cur = (cur + ' ' + w).strip()
+                else:
+                    if cur:
+                        lines_to_draw.append(cur)
+                    cur = w
+            if cur:
+                lines_to_draw.append(cur)
+
+    # if still too many lines, show last ones with a leading indicator
+    if len(lines_to_draw) > max_lines:
+        display_lines_final = lines_to_draw[-max_lines:]
+        display_lines_final.insert(0, '... (showing last lines)')
+    else:
+        display_lines_final = lines_to_draw
+
+    for i, ln in enumerate(display_lines_final):
+        hist_t.goto(x, y - i * 18)
+        try:
+            hist_t.write(ln, font=font, align='left')
+        except Exception:
+            hist_t.write(ln[:max_chars], font=font, align='left')
+
+    # Wait for acknowledgement
+    try:
+        screen, _ = safe_textinput(screen, 'History', 'Press OK to return')
+    except Exception:
+        try:
+            input('Press Enter to continue...')
+        except Exception:
+            pass
+    # clear the text
+    try:
+        hist_t.clear()
+        hist_t.hideturtle()
+        del hist_t
+    except Exception:
+        pass
+
+
+def main_menu():
+    screen = turtle.Screen()
+    screen.title('Tic-Tac-Toe Menu')
+    # Use textinput for menu selection
+    while True:
+        prompt = ("Choose an option:\n"
+                  "1) Human vs Human\n"
+                  "2) Human vs Random computer\n"
+                  "3) Human vs Strategic computer\n"
+                  "4) Load saved game\n"
+                  "5) Show history\n"
+                  "6) Clear history\n"
+                  "7) Quit\n\n"
+                  "Enter 1-7:")
+        screen, choice = safe_textinput(screen, 'Menu', prompt)
+        if choice is None:
+            continue
+        choice = choice.strip()
+        if choice == '1':
+            screen, p1 = safe_textinput(screen, 'Player 1', 'Enter name for Player 1 (X):')
+            p1 = p1 or 'Player1'
+            screen, p2 = safe_textinput(screen, 'Player 2', 'Enter name for Player 2 (O):')
+            p2 = p2 or 'Player2'
+            # reuse the same screen for the game instead of closing it
+            try:
+                play_game('hvh', p1, p2, existing_screen=screen)
+            except Exception as e:
+                report_exception(screen, e)
+            continue
+        elif choice == '2':
+            screen, p1 = safe_textinput(screen, 'Player', 'Enter your name (X):')
+            p1 = p1 or 'Player1'
+            p2 = 'Computer (Random)'
+            try:
+                play_game('hvr_random', p1, p2, existing_screen=screen)
+            except Exception as e:
+                report_exception(screen, e)
+            continue
+        elif choice == '3':
+            screen, p1 = safe_textinput(screen, 'Player', 'Enter your name (X):')
+            p1 = p1 or 'Player1'
+            p2 = 'Computer (Strategic)'
+            try:
+                play_game('hvr_strat', p1, p2, existing_screen=screen)
+            except Exception as e:
+                report_exception(screen, e)
+            continue
+        elif choice == '4':
+            loaded = load_board()
+            if loaded:
+                # If saved data contains player names, use them as defaults
+                saved_names = loaded.get('player_names') if isinstance(loaded, dict) else None
+                if isinstance(saved_names, dict):
+                    def_name1 = saved_names.get('X', 'Player1')
+                    def_name2 = saved_names.get('O', 'Player2')
+                else:
+                    def_name1 = 'Player1'
+                    def_name2 = 'Player2'
+                # Ask names (pre-filled)
+                screen, p1 = safe_textinput(screen, 'Player 1', f'Enter name for Player 1 (X) [default: {def_name1}]:')
+                p1 = p1 or def_name1
+                screen, p2 = safe_textinput(screen, 'Player 2', f'Enter name for Player 2 (O) [default: {def_name2}]:')
+                p2 = p2 or def_name2
+                try:
+                    play_game('hvh', p1, p2, loaded_board=loaded, existing_screen=screen)
+                except Exception as e:
+                    report_exception(screen, e)
+                continue
+            else:
+                # Give a helpful message that explains how to create the binary save (do not show paths on the GUI)
+                msg = ("No saved game found.\n\nTo create a save: start a game, press 'm' during your turn to open the pause menu, type 'save' and press OK.\nPress OK to return to menu.")
+                screen, _ = safe_textinput(screen, 'No save found', msg)
+                continue
+        elif choice == '5':
+            # show history in both console and on-screen
+            print_history()
+            show_history_on_screen(screen)
+            continue
+        elif choice == '6':
+            # clear history with confirmation
+            try:
+                cleared = clear_history(screen)
+            except Exception:
+                cleared = False
+            continue
+        elif choice == '7':
+            try:
+                turtle.bye()
+            except Exception:
+                pass
+            print('Goodbye')
+            return
+        else:
+            continue
+
+
+if __name__ == '__main__':
+    main_menu()
+
